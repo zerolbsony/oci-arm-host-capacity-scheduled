@@ -1,0 +1,90 @@
+name: OCI ARM capacity
+
+on:
+  schedule:
+    - cron: '3-58/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      launch_instances:
+        description: 'Attempt to create the configured OCI instance'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oci-arm-capacity
+  cancel-in-progress: false
+
+jobs:
+  skipped:
+    if: github.event_name == 'workflow_dispatch' && !inputs.launch_instances
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Enable launch_instances to attempt instance creation.'
+
+  provision:
+    if: github.event_name == 'schedule' || inputs.launch_instances
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, mbstring
+          tools: composer:v2
+          coverage: none
+
+      - name: Validate dependency manifest and PHP syntax
+        run: |
+          composer validate --no-check-publish
+          php -l index.php
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-php83-composer-${{ hashFiles('composer.lock') }}
+          restore-keys: ${{ runner.os }}-php83-composer-
+
+      - name: Install locked production dependencies
+        run: composer install --no-dev --prefer-dist --no-progress --no-interaction
+
+      - name: Write OCI private key
+        env:
+          OCI_PRIVATE_KEY_PEM: ${{ secrets.OCI_PRIVATE_KEY_PEM }}
+        run: |
+          test -n "$OCI_PRIVATE_KEY_PEM"
+          umask 077
+          printf '%s' "$OCI_PRIVATE_KEY_PEM" > "$RUNNER_TEMP/oci_api_key.pem"
+
+      - name: Check existing instances and attempt ARM launch
+        id: capacity
+        run: php index.php
+        env:
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_USER_ID: ${{ secrets.OCI_USER_ID }}
+          OCI_TENANCY_ID: ${{ secrets.OCI_TENANCY_ID }}
+          OCI_KEY_FINGERPRINT: ${{ secrets.OCI_KEY_FINGERPRINT }}
+          OCI_PRIVATE_KEY_FILENAME: ${{ runner.temp }}/oci_api_key.pem
+          OCI_AVAILABILITY_DOMAIN: ${{ secrets.OCI_AVAILABILITY_DOMAIN }}
+          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+          OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+          OCI_OCPUS: ${{ secrets.OCI_OCPUS }}
+          OCI_MEMORY_IN_GBS: ${{ secrets.OCI_MEMORY_IN_GBS }}
+          OCI_SHAPE: ${{ secrets.OCI_SHAPE }}
+          OCI_MAX_INSTANCES: ${{ secrets.OCI_MAX_INSTANCES }}
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+          OCI_BOOT_VOLUME_SIZE_IN_GBS: '50'
+
+      - name: Remove runner private key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/oci_api_key.pem"
